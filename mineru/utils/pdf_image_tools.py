@@ -33,7 +33,8 @@ from concurrent.futures.process import BrokenProcessPool
 
 
 DEFAULT_PDF_IMAGE_DPI = 200
-# DEFAULT_PDF_IMAGE_DPI = 144
+_MAX_PDF_IMAGE_DPI = 200
+_MIN_PDF_IMAGE_DPI = 144
 MAX_PDF_RENDER_PROCESSES = 3
 MIN_PAGES_PER_RENDER_PROCESS = 30
 PDF_RENDER_PROCESS_SPAWN_DELAY_SECONDS = 0.1
@@ -45,6 +46,21 @@ _pdf_render_executor_lock = threading.Lock()
 _pdf_render_spawn_submit_lock = threading.Lock()
 _pdf_render_spawn_submit_executor_id: int | None = None
 _pdf_render_spawn_submit_count = 0
+
+
+def get_optimal_pdf_dpi() -> int:
+    env_val = os.getenv('MINERU_PDF_IMAGE_DPI')
+    if env_val is not None:
+        try:
+            return max(_MIN_PDF_IMAGE_DPI, min(_MAX_PDF_IMAGE_DPI, int(env_val)))
+        except ValueError:
+            logger.warning(f"Invalid MINERU_PDF_IMAGE_DPI: {env_val}, using auto-detection")
+    try:
+        from mineru.utils.memory_config import get_memory_optimization_config
+        config = get_memory_optimization_config()
+        return config.pdf_image_dpi
+    except Exception:
+        return DEFAULT_PDF_IMAGE_DPI
 
 
 def pdf_page_to_image(

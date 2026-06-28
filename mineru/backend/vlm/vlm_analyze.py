@@ -40,6 +40,54 @@ from mineru_vl_utils import MinerUClient
 from packaging import version
 
 
+def _get_vlm_quantization() -> str:
+    try:
+        from mineru.utils.memory_config import get_memory_optimization_config
+        config = get_memory_optimization_config()
+        return config.quantization
+    except Exception:
+        return ""
+
+
+def _load_mlx_model_quantized(model_path: str, bits: int = 8):
+    try:
+        from mlx_vlm import load as mlx_load
+        from mlx_vlm.utils import quantize_model
+        from mlx_vlm.prompt import simple_prompt
+    except ImportError:
+        logger.warning("mlx-vlm not available for quantized loading, falling back to default loader")
+        from mineru_vl_utils.mlx_compat import load_mlx_model
+        return load_mlx_model(model_path)
+
+    try:
+        from pathlib import Path
+        model_path_obj = Path(model_path) if not isinstance(model_path, Path) else model_path
+
+        quantized_dir = model_path_obj.parent / f"{model_path_obj.name}_int{bits}"
+        if quantized_dir.exists():
+            logger.info(f"Found pre-quantized MLX model at {quantized_dir}")
+            model, processor = mlx_load(str(quantized_dir))
+            return model, processor
+
+        logger.info(f"Quantizing MLX model to {bits}-bit on-the-fly (this may take a moment)...")
+        model, processor, _ = mlx_load(str(model_path_obj))
+        model, config = quantize_model(model, None, bits, group_size=64)
+
+        try:
+            from mlx_vlm.utils import save_model
+            save_model(str(quantized_dir), model, processor, config)
+            logger.info(f"Saved quantized model to {quantized_dir} for future use")
+            model, processor = mlx_load(str(quantized_dir))
+        except Exception as save_err:
+            logger.debug(f"Could not save quantized model (using in-memory): {save_err}")
+
+        return model, processor
+    except Exception as e:
+        logger.warning(f"MLX quantization failed ({e}), falling back to default loader")
+        from mineru_vl_utils.mlx_compat import load_mlx_model
+        return load_mlx_model(model_path)
+
+
 class ModelSingleton:
     _instance = None
     _models = {}
@@ -94,10 +142,41 @@ class ModelSingleton:
                     else:
                         dtype_key = "torch_dtype"
                     device = get_device()
+                    quantization = _get_vlm_quantization()
+                    load_kwargs = {dtype_key: "auto"}
+                    if quantization == "int8":
+                        logger.info("Loading transformers model with INT8 quantization (bitsandbytes) for memory optimization")
+                        try:
+                            from transformers import BitsAndBytesConfig
+                            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                                load_in_8bit=True,
+                                llm_int8_skip_modules=["vision", "visual", "merger"],
+                            )
+                            load_kwargs.pop(dtype_key, None)
+                            load_kwargs["device_map"] = "auto"
+                        except ImportError:
+                            logger.warning("bitsandbytes not available, falling back to full precision. Install with: pip install bitsandbytes")
+                    elif quantization == "int4":
+                        logger.info("Loading transformers model with INT4 quantization (bitsandbytes nf4) for memory optimization")
+                        try:
+                            from transformers import BitsAndBytesConfig
+                            import torch as _torch
+                            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                                load_in_4bit=True,
+                                bnb_4bit_quant_type="nf4",
+                                bnb_4bit_use_double_quant=True,
+                                bnb_4bit_compute_dtype=_torch.bfloat16,
+                                llm_int8_skip_modules=["vision", "visual", "merger"],
+                            )
+                            load_kwargs.pop(dtype_key, None)
+                            load_kwargs["device_map"] = "auto"
+                        except ImportError:
+                            logger.warning("bitsandbytes not available, falling back to full precision. Install with: pip install bitsandbytes")
+                    else:
+                        load_kwargs["device_map"] = {"": device}
                     model = Qwen2VLForConditionalGeneration.from_pretrained(
                         model_path,
-                        device_map={"": device},
-                        **{dtype_key: "auto"},  # type: ignore
+                        **load_kwargs,
                     )
                     processor = AutoProcessor.from_pretrained(
                         model_path,
@@ -110,7 +189,15 @@ class ModelSingleton:
                     if not mlx_supported:
                         raise EnvironmentError("mlx-engine backend is only supported on macOS 13.5+ with Apple Silicon.")
                     from mineru_vl_utils.mlx_compat import load_mlx_model
-                    model, processor = load_mlx_model(model_path)
+                    quantization = _get_vlm_quantization()
+                    if quantization == "int8":
+                        logger.info("Loading MLX model with INT8 quantization for memory optimization")
+                        model, processor = _load_mlx_model_quantized(model_path, bits=8)
+                    elif quantization == "int4":
+                        logger.info("Loading MLX model with INT4 quantization for memory optimization")
+                        model, processor = _load_mlx_model_quantized(model_path, bits=4)
+                    else:
+                        model, processor = load_mlx_model(model_path)
                 else:
                     if os.getenv('OMP_NUM_THREADS') is None:
                         os.environ["OMP_NUM_THREADS"] = "1"
@@ -135,6 +222,14 @@ class ModelSingleton:
                             kwargs["gpu_memory_utilization"] = set_default_gpu_memory_utilization()
                         if "model" not in kwargs:
                             kwargs["model"] = model_path
+                        vlm_quant = _get_vlm_quantization()
+                        if vlm_quant and "quantization" not in kwargs:
+                            if vlm_quant == "int8":
+                                kwargs["quantization"] = "bitsandbytes"
+                                logger.info("Using vLLM bitsandbytes INT8 quantization")
+                            elif vlm_quant == "int4":
+                                kwargs["quantization"] = "awq"
+                                logger.info("Using vLLM AWQ INT4 quantization")
                         if enable_custom_logits_processors() and ("logits_processors" not in kwargs):
                             from mineru_vl_utils import MinerULogitsProcessor
                             kwargs["logits_processors"] = [MinerULogitsProcessor]
@@ -167,6 +262,14 @@ class ModelSingleton:
                             kwargs["gpu_memory_utilization"] = set_default_gpu_memory_utilization()
                         if "model" not in kwargs:
                             kwargs["model"] = model_path
+                        vlm_quant = _get_vlm_quantization()
+                        if vlm_quant and "quantization" not in kwargs:
+                            if vlm_quant == "int8":
+                                kwargs["quantization"] = "bitsandbytes"
+                                logger.info("Using vLLM bitsandbytes INT8 quantization (async)")
+                            elif vlm_quant == "int4":
+                                kwargs["quantization"] = "awq"
+                                logger.info("Using vLLM AWQ INT4 quantization (async)")
                         if enable_custom_logits_processors() and ("logits_processors" not in kwargs):
                             from mineru_vl_utils import MinerULogitsProcessor
                             kwargs["logits_processors"] = [MinerULogitsProcessor]

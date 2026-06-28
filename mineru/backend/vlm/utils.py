@@ -81,6 +81,20 @@ def set_lmdeploy_backend(device_type: str) -> str:
 
 
 def set_default_gpu_memory_utilization() -> float:
+    env_val = os.getenv("MINERU_GPU_MEMORY_UTILIZATION")
+    if env_val is not None:
+        try:
+            return max(0.1, min(0.95, float(env_val)))
+        except ValueError:
+            logger.warning(f"Invalid MINERU_GPU_MEMORY_UTILIZATION: {env_val}")
+
+    try:
+        from mineru.utils.memory_config import get_memory_optimization_config
+        config = get_memory_optimization_config()
+        return config.gpu_memory_utilization
+    except Exception:
+        pass
+
     from vllm import __version__ as vllm_version
     device = get_device()
     gpu_memory = get_vram(device)
@@ -93,6 +107,15 @@ def set_default_gpu_memory_utilization() -> float:
 
 
 def set_default_batch_size() -> int:
+    try:
+        from mineru.utils.memory_config import get_memory_optimization_config
+        config = get_memory_optimization_config()
+        batch_size = config.vlm_batch_size
+        logger.info(f'Auto-detected VLM batch size: {batch_size}')
+        return batch_size
+    except Exception:
+        pass
+
     try:
         device = get_device()
         gpu_memory = get_vram(device)

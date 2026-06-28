@@ -149,12 +149,52 @@ class AtomModelSingleton:
     _instance = None
     _models = {}
     _lock = PIPELINE_MODEL_INIT_LOCK
+    _last_used = {}
+    _eviction_enabled = None
+    _eviction_budget_gb = None
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super().__new__(cls)
         return cls._instance
+
+    @classmethod
+    def _check_eviction_config(cls):
+        if cls._eviction_enabled is None:
+            try:
+                from mineru.utils.memory_config import get_memory_optimization_config
+                config = get_memory_optimization_config()
+                cls._eviction_enabled = config.model_eviction_enabled
+                cls._eviction_budget_gb = config.model_eviction_budget_gb
+            except Exception:
+                cls._eviction_enabled = False
+                cls._eviction_budget_gb = 999
+
+    @classmethod
+    def _try_evict_if_needed(cls):
+        if not cls._eviction_enabled:
+            return
+        try:
+            import gc as _gc
+            from mineru.utils.config_reader import get_device
+            device = get_device()
+            if len(cls._models) <= 2:
+                return
+            if not cls._last_used:
+                return
+            sorted_keys = sorted(cls._last_used.items(), key=lambda x: x[1])
+            oldest_key = sorted_keys[0][0]
+            if oldest_key in cls._models:
+                evicted_model = cls._models.pop(oldest_key, None)
+                cls._last_used.pop(oldest_key, None)
+                del evicted_model
+                _gc.collect()
+                from mineru.utils.model_utils import clean_memory
+                clean_memory(device)
+                logger.debug(f"Evicted model {oldest_key} to save memory (LRU eviction)")
+        except Exception as e:
+            logger.debug(f"Model eviction skipped: {e}")
 
     def get_atom_model(self, atom_model_name: str, **kwargs):
 
@@ -182,9 +222,27 @@ class AtomModelSingleton:
             key = atom_model_name
 
         with self._lock:
+            self._check_eviction_config()
             if key not in self._models:
+                self._try_evict_if_needed()
                 self._models[key] = atom_model_init(model_name=atom_model_name, **kwargs)
+            import time as _time
+            self._last_used[key] = _time.time()
         return self._models[key]
+
+    @classmethod
+    def evict_all(cls):
+        with cls._lock:
+            cls._models.clear()
+            cls._last_used.clear()
+        import gc as _gc
+        _gc.collect()
+        try:
+            from mineru.utils.model_utils import clean_memory
+            from mineru.utils.config_reader import get_device
+            clean_memory(get_device())
+        except Exception:
+            pass
 
 def atom_model_init(model_name: str, **kwargs):
     atom_model = None

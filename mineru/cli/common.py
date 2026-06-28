@@ -38,6 +38,11 @@ if os.getenv("MINERU_LMDEPLOY_DEVICE", "") == "maca":
     import torch
     torch.backends.cudnn.enabled = False
 
+try:
+    from mineru.utils.memory_config import should_route_to_pipeline
+except ImportError:
+    should_route_to_pipeline = None
+
 
 pdf_suffixes = ["pdf"]
 image_suffixes = ["png", "jpeg", "jp2", "webp", "gif", "bmp", "jpg", "tiff"]
@@ -748,6 +753,21 @@ def do_parse(
             os.environ['MINERU_VLM_TABLE_ENABLE'] = str(table_enable)
             os.environ['MINERU_VLM_FORMULA_ENABLE'] = "true"
 
+            if len(pdf_bytes_list) == 1 and should_route_to_pipeline is not None:
+                try:
+                    if should_route_to_pipeline(pdf_bytes_list[0], "hybrid-" + backend):
+                        logger.info("Adaptive backend: switching from hybrid to pipeline for this text PDF")
+                        _process_pipeline(
+                            output_dir, pdf_file_names, pdf_bytes_list, p_lang_list,
+                            parse_method, formula_enable, table_enable,
+                            f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
+                            f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
+                            client_side_output_generation=client_side_output_generation,
+                        )
+                        return
+                except Exception as e:
+                    logger.debug(f"Adaptive backend selection skipped: {e}")
+
             _process_hybrid(
                 output_dir, pdf_file_names, pdf_bytes_list, parse_method, formula_enable, backend,
                 f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
@@ -842,6 +862,21 @@ async def aio_do_parse(
 
             os.environ['MINERU_VLM_TABLE_ENABLE'] = str(table_enable)
             os.environ['MINERU_VLM_FORMULA_ENABLE'] = "true"
+
+            if len(pdf_bytes_list) == 1 and should_route_to_pipeline is not None:
+                try:
+                    if should_route_to_pipeline(pdf_bytes_list[0], "hybrid-" + backend):
+                        logger.info("Adaptive backend: switching from hybrid to pipeline for this text PDF")
+                        _process_pipeline(
+                            output_dir, pdf_file_names, pdf_bytes_list, p_lang_list,
+                            parse_method, formula_enable, table_enable,
+                            f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
+                            f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
+                            client_side_output_generation=client_side_output_generation,
+                        )
+                        return
+                except Exception as e:
+                    logger.debug(f"Adaptive backend selection skipped: {e}")
 
             await _async_process_hybrid(
                 output_dir, pdf_file_names, pdf_bytes_list, parse_method, formula_enable, backend,

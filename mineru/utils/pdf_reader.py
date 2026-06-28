@@ -10,9 +10,15 @@ from mineru.utils.pdfium_guard import pdfium_guard
 
 def page_to_image(
     page: PdfPage,
-    dpi: int = 200,
+    dpi: int = 0,
     max_width_or_height: int = 3500,  # changed from 4500 to 3500
 ) -> (Image.Image, float):
+    if dpi <= 0:
+        try:
+            from mineru.utils.pdf_image_tools import get_optimal_pdf_dpi
+            dpi = get_optimal_pdf_dpi()
+        except Exception:
+            dpi = 200
     with pdfium_guard():
         scale = dpi / 72
 

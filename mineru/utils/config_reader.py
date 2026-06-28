@@ -158,7 +158,15 @@ def get_ocr_det_mask_inline_formula_enable(enable):
 def get_processing_window_size(default: int = 64) -> int:
     value = os.getenv('MINERU_PROCESSING_WINDOW_SIZE')
     if value is None:
-        return default
+        try:
+            from mineru.utils.memory_config import get_memory_optimization_config
+            config = get_memory_optimization_config()
+            auto_size = config.processing_window_size
+            if auto_size != default:
+                logger.info(f"Auto-detected processing window size: {auto_size} (default: {default})")
+            return auto_size
+        except Exception:
+            return default
     try:
         window_size = int(value)
     except ValueError:

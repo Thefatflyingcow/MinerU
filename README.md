@@ -435,41 +435,48 @@ This repository is licensed under the [MinerU Open Source License](https://githu
 
 # Adaptive Memory Optimization
 
-This fork adds an **adaptive memory optimization system** that auto-detects your hardware and configures MinerU to run efficiently on memory-constrained devices — especially **Apple Silicon Macs with 16GB unified memory**.
+> **Disclaimer:** This is a proof-of-concept fork. The optimizations were tested with synthetic PDFs and unit tests — not a full real-world evaluation. The VLM INT8 quantization path is code-complete but hasn't been benchmarked end-to-end against the unquantized version for actual parsing quality. The main idea is to make MinerU *runnable* on lower-end hardware (like a 16GB Mac), not to claim it's production-validated. I did this mostly because it seemed like a fun project.
 
 ## What It Does
 
-At startup, MinerU now probes your system and automatically applies the optimal configuration:
+This fork adds an adaptive memory optimization system that auto-detects your hardware at startup and tunes MinerU's settings to fit. The goal is simple: **let MinerU run on machines that would otherwise OOM**.
+
+At startup, MinerU probes your system and automatically applies the best settings it can find:
 
 | Setting | What it does | On 16GB Mac |
 |---|---|---|
-| **VLM INT8 Quantization** | Loads the MinerU2.5-Pro VLM at 8-bit precision instead of BF16 | Saves ~1.8GB RAM, 0.06% accuracy drop |
-| **Adaptive Processing Window** | Reduces pages held in memory from 64 to 2-8 | Saves ~200MB image RAM |
-| **Adaptive PDF DPI** | Renders pages at 144 DPI instead of 200 on low-memory systems | Saves 48% per-page image RAM |
-| **LRU Model Eviction** | Evicts least-recently-used pipeline models when memory is tight | Saves ~300-500MB peak RAM |
-| **Adaptive Backend Routing** | Routes text-only PDFs to the pipeline backend (skips VLM entirely) | Saves ~2.4GB when triggered |
-| **Lower GPU Memory Utilization** | Reduces vLLM/MLX KV cache reservation from 50% to 30% | Saves ~0.5GB |
+| **VLM INT8 Quantization** | Loads the MinerU2.5-Pro VLM at 8-bit precision instead of BF16 | ~1.8GB less RAM |
+| **Adaptive Processing Window** | Reduces pages held in memory from 64 to 2-8 | ~200MB less image RAM |
+| **Adaptive PDF DPI** | Renders pages at 144 DPI instead of 200 on low-memory systems | 48% less per-page image RAM |
+| **LRU Model Eviction** | Evicts least-recently-used pipeline models when memory is tight | ~300-500MB less peak RAM |
+| **Adaptive Backend Routing** | Routes text-only PDFs to the pipeline backend (skips VLM entirely) | ~2.4GB less when triggered |
+| **Lower GPU Memory Utilization** | Reduces vLLM/MLX KV cache reservation from 50% to 30% | ~0.5GB less |
 
-### Benchmarked Results (M1 Pro 16GB)
+## What Was Actually Tested
 
-| Metric | Original | Optimized | Improvement |
-|---|---|---|---|
-| Peak RSS (50-page PDF) | 1,775MB | 1,376MB | **22% reduction** |
-| Image RAM (8 pages) | 88.5MB | 45.9MB | **48% reduction** |
-| VLM weight memory | ~2.4GB (BF16) | ~0.6GB (INT8) | **75% reduction** |
-| OOM risk on 16GB Mac | High | None | **Eliminated** |
+- **Memory profiling & auto-config** — works, correctly detects M1 Pro 16GB and applies INT8 / window=2 / dpi=144 / eviction=on
+- **Pipeline parsing of synthetic PDFs** — ran 4 test PDFs (text, table, mixed, 50-page large) through the pipeline backend, all completed successfully with markdown output
+- **Peak memory comparison** — 50-page PDF: optimized peaked at 1,376MB vs 1,775MB unoptimized (22% reduction)
+- **Image RAM at different DPIs** — 200 DPI = 88.5MB for 8 pages, 144 DPI = 45.9MB (48% reduction)
+- **Env var overrides** — all 7 env vars tested and verified
 
-### Quality Impact
+## What Wasn't Tested
 
-Based on Qwen2-VL-2B INT8 benchmarks (the architecture MinerU2.5-Pro is built on):
+- **VLM (MLX) end-to-end parsing with INT8 quantization** — there was a transformers/MLX version conflict in the test venv that prevented running the full VLM pipeline. The quantization code paths are verified via unit tests but not validated on real document parsing
+- **Actual quality comparison (quantized vs unquantized)** — the 0.06% DocVQA drop figure is from Qwen2-VL-2B's published GPTQ-Int8 benchmarks, not from running MinerU2.5-Pro directly. The real-world impact on MinerU's parsing output quality is unknown
+- **Real-world PDFs** — all test PDFs were synthetically generated with reportlab. Real scanned documents, complex academic papers, handwritten content etc. were not tested
+- **Speed impact of INT8** — INT8 can be faster or slower depending on the backend. Not benchmarked
 
-| Task | BF16 | INT8 | Drop |
+## Expected Quality Impact (Based on Research, Not Measured)
+
+The MinerU2.5-Pro VLM is a fine-tuned Qwen2-VL-2B. Published INT8 benchmarks for that architecture:
+
+| Task | BF16 | INT8 (published) | Drop |
 |---|---|---|---|
 | DocVQA | 88.34 | 88.28 | 0.06% |
 | MMMU | 41.88 | 41.55 | 0.33% |
-| OmniDocBench (estimated) | 95.72 | ~94-95 | ~0.5-1% |
 
-**The accuracy drop is negligible for document parsing tasks.**
+These are from the Qwen team's own GPTQ-Int8 models — your mileage may vary with bitsandbytes/MLX quantization on a fine-tuned variant. The expectation is that document parsing (structured JSON/Markdown output) is less sensitive to quantization than reasoning tasks, but this is an assumption, not a measured result.
 
 ## How It Works
 
